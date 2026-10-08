@@ -1,0 +1,156 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply m-0 bg-[#102129] font-sans text-gray-100 antialiased;
+  }
+  button, input {
+    font: inherit;
+  }
+  ::selection {
+    @apply bg-violet-300/25 text-white;
+  }
+  * {
+    scrollbar-color: rgba(148, 163, 184, 0.22) transparent;
+    scrollbar-width: thin;
+  }
+}
+
+@layer components {
+  .input-field {
+    @apply w-full rounded-xl border border-white/[0.09] bg-black/20 px-4 py-3 text-gray-100 outline-none transition placeholder:text-gray-600 focus:border-violet-300/50 focus:ring-2 focus:ring-violet-300/10;
+  }
+}
+
+.auth-shell {
+  background:
+    radial-gradient(ellipse at 78% 5%, rgba(45, 212, 191, 0.19), transparent 38%),
+    radial-gradient(ellipse at 12% 92%, rgba(56, 189, 248, 0.14), transparent 34%),
+    #102129;
+}
+
+.auth-glow {
+  position: fixed;
+  width: 24rem;
+  height: 24rem;
+  border-radius: 9999px;
+  filter: blur(100px);
+  pointer-events: none;
+}
+
+.auth-glow-one {
+  top: -14rem;
+  left: -10rem;
+  background: rgba(45, 212, 191, 0.17);
+}
+
+.auth-glow-two {
+  right: -14rem;
+  bottom: -16rem;
+  background: rgba(56, 189, 248, 0.16);
+}
+
+.primary-button {
+  background: linear-gradient(120deg, #38b2a2, #247f7b 58%, #316f78);
+  box-shadow: 0 8px 28px rgba(25, 111, 111, 0.2);
+}
+
+.primary-button:not(:disabled):hover {
+  filter: brightness(1.06);
+  box-shadow: 0 10px 32px rgba(25, 111, 111, 0.32);
+}
+
+.chat-shell {
+  background:
+    radial-gradient(ellipse at 78% 4%, rgba(130, 195, 181, 0.32), transparent 38%),
+    radial-gradient(ellipse at 12% 92%, rgba(110, 178, 190, 0.22), transparent 34%),
+    #bccfc9;
+}
+
+.chat-frame {
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  background: rgba(238, 246, 243, 0.46);
+  box-shadow: 0 24px 80px rgba(21, 55, 58, 0.18);
+  backdrop-filter: blur(28px);
+}
+
+.app-rail {
+  background: linear-gradient(180deg, rgba(59, 102, 102, 0.78), rgba(44, 85, 90, 0.84));
+}
+
+.contacts-panel {
+  background: rgba(241, 248, 245, 0.68);
+  backdrop-filter: blur(24px);
+}
+
+.chat-main {
+  background:
+    radial-gradient(ellipse at 75% 5%, rgba(152, 204, 192, 0.42), transparent 38%),
+    linear-gradient(145deg, rgba(222, 237, 231, 0.72), rgba(193, 216, 208, 0.8));
+}
+
+.chat-header,
+.composer-panel {
+  background: rgba(238, 246, 243, 0.46);
+  backdrop-filter: blur(18px);
+}
+
+.message-notice {
+  background: rgba(245, 251, 248, 0.94);
+  backdrop-filter: blur(18px);
+  animation: notice-in 180ms ease-out;
+}
+
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.contact-row:hover {
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.contact-row-active,
+.contact-row-active:hover {
+  border: 1px solid rgba(62, 133, 124, 0.16);
+  background: linear-gradient(100deg, rgba(74, 160, 145, 0.18), rgba(255, 255, 255, 0.38));
+}
+
+.message-bubble {
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+}
+
+.chat-messages {
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+
+.message-row {
+  contain: layout style;
+}
+
+.message-mine {
+  background: linear-gradient(145deg, rgba(177, 218, 207, 0.95), rgba(143, 195, 184, 0.96));
+}
+
+.message-theirs {
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  background: rgba(250, 252, 251, 0.83);
+}
+
+@media (max-width: 639px) {
+  .chat-frame {
+    border: 0;
+  }
+}

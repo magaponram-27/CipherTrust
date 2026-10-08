@@ -1,0 +1,12 @@
+{
+  "name": "CipherTrust Private Chat",
+  "short_name": "CipherTrust",
+  "description": "End-to-end encrypted chat with on-device image analysis",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111827",
+  "theme_color": "#111827",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
