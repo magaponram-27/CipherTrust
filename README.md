@@ -44,6 +44,12 @@ The server authenticates API and socket connections, enforces the sender identit
 
 ## Deployment
 
+### Full-stack deployment on Render
+
+The root `render.yaml` deploys the API and frontend together as a Render Blueprint. Before deploying, create a MongoDB Atlas cluster and database user, and allow the Render service to connect. Then open [Render's Blueprint creation page](https://dashboard.render.com/blueprint/new?repo=https%3A%2F%2Fgithub.com%2Fmagaponram-27%2FCipherTrust), connect this repository, and enter the Atlas connection string for `MONGO_URI` when prompted. The Blueprint generates `JWT_SECRET` and configures the frontend to use the deployed API automatically. After both services finish deploying, Render provides the public frontend URL.
+
+The free API instance can take a short time to wake after inactivity. Keep Atlas credentials private; do not commit them to the repository.
+
 ### MongoDB Atlas
 
 1. Create an M0 cluster and a dedicated database user.
