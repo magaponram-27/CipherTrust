@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 const Message = require('./models/Message');
 const User = require('./models/User');
+const normalizeMongoUri = require('./lib/mongoUri');
 
 if (!process.env.MONGO_URI || !process.env.JWT_SECRET) {
   throw new Error('MONGO_URI and JWT_SECRET must be set');
@@ -163,7 +164,7 @@ io.on('connection', (socket) => {
 });
 
 async function start() {
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(normalizeMongoUri(process.env.MONGO_URI));
   const port = Number(process.env.PORT) || 5000;
   server.listen(port, () => console.log(`CipherTrust API listening on port ${port}`));
 }
