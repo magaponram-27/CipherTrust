@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { containsLinks, inspectLinks } from './contentSafety.js';
+import {
+  configureImageModelBackend,
+  containsLinks,
+  inspectImageSafety,
+  inspectLinks
+} from './contentSafety.js';
 
 test('flags known URL shorteners without fetching the destination', () => {
   const [link] = inspectLinks('Please check https://bit.ly/example');
@@ -94,4 +99,57 @@ test('recognizes bare domains and flags encoded lookalike characters', () => {
   const [link] = inspectLinks('Visit https://аррӏе.com/login');
 
   assert.ok(link.reasons.some((reason) => /encoded characters/i.test(reason)));
+});
+
+test('falls back to TensorFlow CPU when mobile WebGL is unavailable', async () => {
+  const calls = [];
+  const tensorflow = {
+    async setBackend(name) {
+      calls.push(name);
+      if (name === 'webgl') throw new Error('WebGL is unavailable');
+      return true;
+    },
+    async ready() {}
+  };
+
+  assert.equal(await configureImageModelBackend(tensorflow), 'cpu');
+  assert.deepEqual(calls, ['webgl', 'cpu']);
+});
+
+test('classifies a reduced image and preserves safety thresholds', async () => {
+  const canvas = { width: 224, height: 224 };
+  let classifiedImage;
+  const result = await inspectImageSafety(new Blob(), {
+    prepareImage: async () => canvas,
+    loadModel: async () => ({
+      async classify(image) {
+        classifiedImage = image;
+        return [{ className: 'Porn', probability: 0.41 }];
+      }
+    })
+  });
+
+  assert.equal(classifiedImage, canvas);
+  assert.deepEqual(result, {
+    restricted: true,
+    category: 'adult or sexually explicit image',
+    confidence: 0.41
+  });
+  assert.equal(canvas.width, 0);
+  assert.equal(canvas.height, 0);
+});
+
+test('reports image scan failures with the underlying reason', async () => {
+  await assert.rejects(
+    inspectImageSafety(new Blob(), {
+      prepareImage: async () => { throw new Error('Browser could not decode HEIC'); },
+      loadModel: async () => ({ classify: async () => [] })
+    }),
+    (error) => {
+      assert.match(error.message, /could not decode HEIC/i);
+      assert.match(error.message, /image was not sent or displayed/i);
+      assert.equal(error.cause.message, 'Browser could not decode HEIC');
+      return true;
+    }
+  );
 });

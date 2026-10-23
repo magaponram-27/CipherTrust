@@ -3,6 +3,7 @@ import { addContact, blockContact, getMessages, getUsers, unblockContact } from 
 import { decryptFile, decryptMessage, deriveConversationKey, encryptFile, encryptMessage } from '../crypto';
 import { inspectGeneratorMetadata } from '../aiDetect';
 import { containsLinks, inspectImageSafety, inspectLinks, inspectTextSafety } from '../contentSafety';
+import { prepareImageForSending } from '../imageProcessing';
 import socket from '../socket';
 
 function formatTime(timestamp) {
@@ -423,28 +424,30 @@ export default function Chat({ user, onLogout }) {
     event.target.value = '';
     if (!file || !selected?.publicKey || conversationBlocked) return;
     const recipient = selected;
-    if (!/^image\/(?:jpeg|png|webp|gif|avif|bmp|tiff)$/i.test(file.type)) {
-      setError('Choose a JPEG, PNG, WebP, GIF, AVIF, BMP, or TIFF image.');
+    if (!/^image\/(?:jpeg|png|webp|gif|avif|bmp|tiff|heic|heif|heic-sequence|heif-sequence)$/i.test(file.type)) {
+      setError('Choose a JPEG, PNG, WebP, GIF, AVIF, BMP, TIFF, HEIC, or HEIF image.');
       return;
     }
-    if (file.size > 6 * 1024 * 1024) {
-      setError('Images must be smaller than 6 MB so the encrypted message fits the relay limit.');
+    if (file.size > 20 * 1024 * 1024) {
+      setError('Images must be smaller than 20 MB to prepare safely on this device.');
       return;
     }
     setBusy(true);
     setError('');
     try {
       if (!socket.connected) throw new Error('Chat server is disconnected. Check your connection and try again.');
+      setImageSendStatus('Preparing image for this device…');
+      const preparedFile = await prepareImageForSending(file);
       setImageSendStatus('Checking image safety and metadata on this device…');
       const [contentSafety, analysis] = await Promise.all([
-        inspectImageSafety(file),
+        inspectImageSafety(preparedFile),
         inspectGeneratorMetadata(file)
       ]);
       if (contentSafety.restricted) throw new Error(`Image blocked: it may contain ${contentSafety.category}.`);
       if (!socket.connected) throw new Error('Chat connection dropped during image checking. Retry when the chat reconnects.');
       setImageSendStatus('Encrypting image on this device…');
       const key = await deriveConversationKey(user.identity.privateKey, recipient.publicKey);
-      const encrypted = await encryptFile(file, key);
+      const encrypted = await encryptFile(preparedFile, key);
       const clientId = crypto.randomUUID();
       const timestamp = Date.now();
       setImageSendStatus('Sending encrypted image…');
@@ -463,7 +466,7 @@ export default function Chat({ user, onLogout }) {
         });
       });
       if (!result?.messageId) throw new Error('The server did not confirm image delivery.');
-      const objectUrl = URL.createObjectURL(file);
+      const objectUrl = URL.createObjectURL(preparedFile);
       imageObjectUrlsRef.current.add(objectUrl);
       setMessages((current) => [...current, {
         _id: result.messageId,
@@ -644,7 +647,7 @@ export default function Chat({ user, onLogout }) {
   }
 
   return (
-    <div className="chat-shell flex h-[100dvh] min-h-[520px] overflow-hidden p-0 text-gray-100 sm:p-3 lg:p-5">
+    <div className="chat-shell flex h-[100dvh] min-h-0 overflow-hidden p-0 text-gray-100 sm:p-3 lg:p-5">
       <div className="chat-frame flex min-h-0 w-full overflow-hidden sm:rounded-2xl">
       <aside className={`${selected ? 'hidden md:flex' : 'flex'} contacts-panel w-full flex-col border-r border-white/50 md:w-[310px] md:shrink-0 lg:w-[340px]`}>
         <div className="flex items-center justify-between border-b border-white/40 px-5 py-5">

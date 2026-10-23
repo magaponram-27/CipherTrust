@@ -153,4 +153,17 @@
   .chat-frame {
     border: 0;
   }
+
+  .chat-header {
+    padding-top: max(1rem, env(safe-area-inset-top));
+  }
+
+  .composer-panel {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+
+  button,
+  label {
+    touch-action: manipulation;
+  }
 }

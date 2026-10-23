@@ -95,6 +95,7 @@ const redirectParameterPattern = /^(?:continue|dest|destination|next|redirect|re
 const linkPattern = /(?:https?:\/\/|www\.)[^\s<>"']+|(?:[\p{L}\d](?:[\p{L}\d-]*[\p{L}\d])?\.)+[\p{L}]{2,}(?::\d{1,5})?(?:\/[^\s<>"']*)?/giu;
 
 let adultImageModelPromise;
+const imageModelInputSize = 224;
 
 export function inspectTextSafety(text) {
   for (const rule of restrictedTextPatterns) {
@@ -234,7 +235,7 @@ async function loadAdultImageModel() {
         import('nsfwjs/models/mobilenet_v2')
       ]);
       tensorflow.enableProdMode();
-      await tensorflow.ready();
+      await configureImageModelBackend(tensorflow);
       return nsfwjs.load('MobileNetV2', { modelDefinitions: [modelDefinition.MobileNetV2Model] });
     })().catch((error) => {
       adultImageModelPromise = null;
@@ -244,41 +245,113 @@ async function loadAdultImageModel() {
   return adultImageModelPromise;
 }
 
+export async function configureImageModelBackend(tensorflow) {
+  let lastError;
+  for (const backend of ['webgl', 'cpu']) {
+    try {
+      if (await tensorflow.setBackend(backend)) {
+        await tensorflow.ready();
+        return backend;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error('This browser does not have a compatible image-analysis backend.', { cause: lastError });
+}
+
 function loadImage(source) {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('The image could not be decoded for a safety check.'));
+    image.onerror = () => reject(new Error('The browser could not decode this image.'));
     image.src = source;
   });
 }
 
-export async function inspectImageSafety(fileOrDataUrl) {
-  let imageSource = fileOrDataUrl;
-  let objectUrl;
-  if (fileOrDataUrl instanceof Blob) {
-    objectUrl = URL.createObjectURL(fileOrDataUrl);
-    imageSource = objectUrl;
+async function prepareImageForClassification(source) {
+  let image;
+  let bitmapError;
+  if (source instanceof Blob && typeof createImageBitmap === 'function') {
+    try {
+      image = await createImageBitmap(source, {
+        resizeWidth: imageModelInputSize,
+        resizeHeight: imageModelInputSize,
+        resizeQuality: 'low'
+      });
+    } catch (error) {
+      bitmapError = error;
+    }
   }
 
+  let objectUrl;
+  if (!image) {
+    const imageSource = source instanceof Blob
+      ? (objectUrl = URL.createObjectURL(source))
+      : source;
+    try {
+      image = await loadImage(imageSource);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Unknown image decoding error.';
+      throw new Error(
+        `${reason}${bitmapError instanceof Error ? ` (image bitmap error: ${bitmapError.message})` : ''}`
+      );
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  let canvas;
   try {
-    const [model, image] = await Promise.all([
-      loadAdultImageModel(),
-      loadImage(imageSource)
+    canvas = document.createElement('canvas');
+    canvas.width = imageModelInputSize;
+    canvas.height = imageModelInputSize;
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) throw new Error('This browser could not create a canvas for image analysis.');
+    context.drawImage(image, 0, 0, imageModelInputSize, imageModelInputSize);
+    return canvas;
+  } finally {
+    if (typeof image.close === 'function') image.close();
+  }
+}
+
+function findRiskyAdultPrediction(predictions) {
+  return predictions.find(({ className, probability }) =>
+    ((className === 'Porn' || className === 'Hentai') && probability >= 0.4) ||
+    (className === 'Sexy' && probability >= 0.7)
+  );
+}
+
+export async function inspectImageSafety(fileOrDataUrl, dependencies = {}) {
+  const loadModel = dependencies.loadModel || loadAdultImageModel;
+  const prepareImage = dependencies.prepareImage || prepareImageForClassification;
+  let canvas;
+  try {
+    const [modelResult, imageResult] = await Promise.allSettled([
+      loadModel(),
+      prepareImage(fileOrDataUrl)
     ]);
-    const predictions = await model.classify(image);
-    const riskyAdultPrediction = predictions.find(({ className, probability }) =>
-      ((className === 'Porn' || className === 'Hentai') && probability >= 0.4) ||
-      (className === 'Sexy' && probability >= 0.7)
-    );
+    if (imageResult.status === 'fulfilled') canvas = imageResult.value;
+    if (modelResult.status === 'rejected') throw modelResult.reason;
+    if (imageResult.status === 'rejected') throw imageResult.reason;
+    const predictions = await modelResult.value.classify(imageResult.value);
+    const riskyAdultPrediction = findRiskyAdultPrediction(predictions);
     return riskyAdultPrediction ? {
       restricted: true,
       category: 'adult or sexually explicit image',
       confidence: riskyAdultPrediction.probability
     } : { restricted: false, category: null, confidence: 0 };
-  } catch {
-    throw new Error('The image safety check could not run, so the image was not sent or displayed. Try again in a supported browser.');
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Unknown image-analysis error.';
+    throw new Error(
+      `The on-device image safety check failed: ${reason} The image was not sent or displayed. ` +
+      'Check your connection for the first model download and try an up-to-date browser.',
+      { cause: error }
+    );
   } finally {
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if (canvas) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
   }
 }
