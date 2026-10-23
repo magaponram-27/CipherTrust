@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { addContact, blockContact, getMessages, getUsers, unblockContact } from '../api';
 import { decryptFile, decryptMessage, deriveConversationKey, encryptFile, encryptMessage } from '../crypto';
 import { inspectGeneratorMetadata } from '../aiDetect';
-import { inspectImageSafety, inspectLinks, inspectTextSafety } from '../contentSafety';
+import { containsLinks, inspectImageSafety, inspectLinks, inspectTextSafety } from '../contentSafety';
 import socket from '../socket';
 
 function formatTime(timestamp) {
@@ -81,6 +81,7 @@ export default function Chat({ user, onLogout }) {
   );
   const canAddSearchedContact = /^[a-z0-9_]{3,24}$/i.test(contactSearch.trim()) && !exactContactMatch;
   const suspiciousDraftLinks = inspectLinks(draft);
+  const draftContainsLinks = containsLinks(draft);
   const conversationBlocked = Boolean(selected?.blockedByMe || selected?.blockedMe);
 
   function openNotifiedMessage(username, messageId) {
@@ -194,10 +195,12 @@ export default function Chat({ user, onLogout }) {
         }
       }
       const restrictedCategory = message.type === 'text' ? inspectTextSafety(body) : null;
+      const hasLinks = message.type === 'text' && containsLinks(body);
       const suspiciousLinks = message.type === 'text' ? inspectLinks(body) : [];
       return {
         ...message,
         replyTo,
+        hasLinks,
         suspiciousLinks,
         body: restrictedCategory
           ? `[Restricted on this device: ${restrictedCategory} was hidden]`
@@ -402,7 +405,7 @@ export default function Chat({ user, onLogout }) {
       socket.emit('send-message', { to: selected.username, ...encrypted, type: 'text', clientId });
       setMessages((current) => [...current, {
         _id: `local-${clientId}`, clientId, from: user.username, to: selected.username,
-        body: text, timestamp, type: 'text', replyTo, suspiciousLinks
+        body: text, timestamp, type: 'text', replyTo, hasLinks: containsLinks(text), suspiciousLinks
       }]);
       setDraft('');
       setReplyingTo(null);
@@ -752,7 +755,9 @@ export default function Chat({ user, onLogout }) {
                   message.type === 'image' && (message.body.startsWith('data:image/') || message.body.startsWith('blob:')) ? <img src={message.body} alt="Encrypted shared image" loading="lazy" decoding="async" className="mb-2 max-h-72 max-w-full rounded-lg object-contain" /> :
                     message.type === 'image' ? <p className="text-sm">🔒 {message.body}</p> :
                     <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.body}</p>}
-                  {message.suspiciousLinks?.length > 0 && <div role="status" className="mt-2 rounded-lg border border-amber-300/70 bg-amber-50/80 px-2.5 py-2 text-left text-[11px] leading-relaxed text-amber-900"><p className="font-semibold">Potential scam link — check before opening</p>{message.suspiciousLinks.map((link) => <p key={link.url} className="mt-1 break-all"><span className="font-medium">{link.url}</span>: {link.reasons.join(' ')}</p>)}</div>}
+                  {message.suspiciousLinks?.length > 0
+                    ? <div role="status" className="mt-2 rounded-lg border border-amber-300/70 bg-amber-50/80 px-2.5 py-2 text-left text-[11px] leading-relaxed text-amber-900"><p className="font-semibold">Potential scam link — check before opening</p>{message.suspiciousLinks.map((link) => <p key={link.url} className="mt-1 break-all"><span className="font-medium">{link.url}</span>: {link.reasons.join(' ')}</p>)}</div>
+                    : message.hasLinks && <p role="status" className="mt-2 rounded-lg border border-teal-200/70 bg-teal-50/80 px-2.5 py-2 text-left text-[11px] leading-relaxed text-teal-900">Link checked on this device: no obvious phishing patterns found. This does not verify that the site is safe.</p>}
                   {message.aiVerdict && <p className="mt-2 rounded-lg border border-teal-950/5 bg-white/35 px-2.5 py-1.5 text-[11px] text-slate-700">On-device AI metadata check (not an authenticity verdict): {message.aiVerdict}</p>}
                   <p className={`mt-1.5 text-right text-[10px] ${mine ? 'text-teal-950/50' : 'text-slate-500'}`}>{formatTime(message.timestamp)}</p>
                 </div>
@@ -770,7 +775,9 @@ export default function Chat({ user, onLogout }) {
           {!selected.publicKey && <p className="mx-4 mb-2 rounded-xl border border-amber-300/50 bg-amber-50/70 px-3 py-2.5 text-sm text-amber-800 sm:mx-7">This contact must sign in before you can send encrypted messages.</p>}
           {imageSendStatus && <p role="status" className="mx-4 mb-2 rounded-lg border border-teal-200/60 bg-teal-50/70 px-3 py-2 text-xs text-teal-900 sm:mx-7">{imageSendStatus}</p>}
           <form onSubmit={sendText} className="composer-panel relative border-t border-white/50 p-3 sm:px-7 sm:py-4">
-            {suspiciousDraftLinks.length > 0 && <div role="status" className="mb-2 rounded-xl border border-amber-300/70 bg-amber-50/80 px-3 py-2 text-xs leading-relaxed text-amber-900"><p className="font-semibold">Potential scam link — check before sending</p>{suspiciousDraftLinks.map((link) => <p key={link.url} className="mt-1 break-all"><span className="font-medium">{link.url}</span>: {link.reasons.join(' ')}</p>)}</div>}
+            {suspiciousDraftLinks.length > 0
+              ? <div role="status" className="mb-2 rounded-xl border border-amber-300/70 bg-amber-50/80 px-3 py-2 text-xs leading-relaxed text-amber-900"><p className="font-semibold">Potential scam link — check before sending</p>{suspiciousDraftLinks.map((link) => <p key={link.url} className="mt-1 break-all"><span className="font-medium">{link.url}</span>: {link.reasons.join(' ')}</p>)}</div>
+              : draftContainsLinks && <p role="status" className="mb-2 rounded-xl border border-teal-200/70 bg-teal-50/80 px-3 py-2 text-xs leading-relaxed text-teal-900">Link checked on this device: no obvious phishing patterns found. This does not verify that the site is safe.</p>}
             {replyingTo && <div className="mb-2 flex items-center justify-between rounded-xl border-l-2 border-teal-700 bg-white/45 px-3 py-2"><div className="min-w-0"><p className="text-xs font-semibold text-teal-800">Replying to {replyingTo.from === user.username ? 'yourself' : `@${replyingTo.from}`}</p><p className="truncate text-xs text-slate-600">{replyingTo.preview}</p></div><button type="button" onClick={() => setReplyingTo(null)} className="ml-3 rounded-md px-2 py-1 text-slate-500 hover:bg-white/70" aria-label="Cancel reply">✕</button></div>}
             {emojiPickerOpen && <div className="absolute bottom-full left-3 z-20 mb-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-white/80 bg-white/95 shadow-xl backdrop-blur sm:left-7">
               <div role="tablist" aria-label="Message reactions" className="flex gap-1 border-b border-slate-200 p-2">

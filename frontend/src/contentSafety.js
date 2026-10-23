@@ -57,6 +57,25 @@ const shortenedUrlHosts = new Set([
   'tinyurl.com'
 ]);
 
+const riskyTopLevelDomains = new Set([
+  'click',
+  'country',
+  'gq',
+  'link',
+  'loan',
+  'ml',
+  'mom',
+  'mov',
+  'online',
+  'rest',
+  'ru',
+  'shop',
+  'support',
+  'top',
+  'work',
+  'zip'
+]);
+
 const trustedBrandHosts = {
   amazon: ['amazon.com', 'amazon.co.uk', 'amazon.ca', 'amazon.de', 'amazon.in', 'amazon.co.jp'],
   apple: ['apple.com', 'icloud.com'],
@@ -70,6 +89,11 @@ const trustedBrandHosts = {
   whatsapp: ['whatsapp.com']
 };
 
+const loginLurePattern = /\b(?:account|billing|delivery|invoice|locked|password|payment|refund|security|suspended|urgent|verify|verification|wallet)\b/i;
+const urgentActionPattern = /\b(?:act now|expires today|immediately|locked|suspended|urgent|verify now|within \d+ hours?)\b/i;
+const redirectParameterPattern = /^(?:continue|dest|destination|next|redirect|redirect_uri|return|returnto|return_url|target|url)$/i;
+const linkPattern = /(?:https?:\/\/|www\.)[^\s<>"']+|(?:[\p{L}\d](?:[\p{L}\d-]*[\p{L}\d])?\.)+[\p{L}]{2,}(?::\d{1,5})?(?:\/[^\s<>"']*)?/giu;
+
 let adultImageModelPromise;
 
 export function inspectTextSafety(text) {
@@ -79,14 +103,24 @@ export function inspectTextSafety(text) {
   return null;
 }
 
+function findLinkMatches(text) {
+  if (typeof text !== 'string' || !text) return [];
+  return Array.from(text.matchAll(new RegExp(linkPattern.source, linkPattern.flags)));
+}
+
+export function containsLinks(text) {
+  return findLinkMatches(text).length > 0;
+}
+
 export function inspectLinks(text) {
   if (typeof text !== 'string' || !text) return [];
 
-  const matches = text.matchAll(/(?:https?:\/\/|www\.)[^\s<>"']+|(?:[\p{L}\d](?:[\p{L}\d-]*[\p{L}\d])?\.)+[\p{L}]{2,}(?:\/[^\s<>"']*)?/giu);
   const flagged = [];
   const seen = new Set();
 
-  for (const [match] of matches) {
+  for (const result of findLinkMatches(text)) {
+    const match = result[0];
+    const offset = result.index ?? 0;
     const candidate = match.replace(/[),.!?;:]+$/g, '');
     const normalized = candidate.replace(/^www\./i, 'https://www.');
     let url;
@@ -97,6 +131,8 @@ export function inspectLinks(text) {
     }
     const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     const reasons = [];
+    const context = text.slice(Math.max(0, offset - 100), Math.min(text.length, offset + match.length + 100));
+    const hostLabels = hostname.split('.');
 
     if (url.username || url.password) reasons.push('The link contains hidden login credentials.');
     if (hostname.startsWith('xn--') || hostname.split('.').some((label) => label.startsWith('xn--'))) {
@@ -114,12 +150,29 @@ export function inspectLinks(text) {
     if (hostname.split('.').length > 4) {
       reasons.push('The domain has an unusually long chain of subdomains.');
     }
+    if (riskyTopLevelDomains.has(hostLabels.at(-1))) {
+      reasons.push('The link uses a top-level domain frequently abused in deceptive links.');
+    }
 
     const isRecognizedBrandHost = Object.values(trustedBrandHosts).flat().some((host) =>
       hostname === host || hostname.endsWith(`.${host}`)
     );
-    if (!isRecognizedBrandHost && /(?:^|\/)(?:login|log-in|signin|sign-in|verify|verification|account|password|auth)(?:\/|$|[?#.-])/i.test(url.pathname)) {
+    const isAccountPath = /(?:^|\/)(?:login|log-in|signin|sign-in|verify|verification|account|password|auth|dashboard|portal)(?:\/|$|[?#.-])/i.test(url.pathname);
+    const isAccountHost = /(?:^|[-.])(?:login|log-in|signin|sign-in|verify|verification|account|auth)(?:[-.]|$)/i.test(hostname);
+    const hasAccountLure = loginLurePattern.test(context) || isAccountPath;
+    if (!isRecognizedBrandHost && (isAccountPath || isAccountHost)) {
       reasons.push('The link opens a sign-in or account-verification page on an unrecognized domain.');
+    }
+    if (!isRecognizedBrandHost && loginLurePattern.test(context) && url.protocol !== 'https:') {
+      reasons.push('The message uses account or payment language with a link that is not HTTPS.');
+    }
+    if (!isRecognizedBrandHost && url.protocol === 'https:' &&
+        loginLurePattern.test(context) && urgentActionPattern.test(context)) {
+      reasons.push('The message combines an unrecognized domain with urgent account-verification language.');
+    }
+    if (!isRecognizedBrandHost && hasAccountLure &&
+        url.searchParams && [...url.searchParams.keys()].some((name) => redirectParameterPattern.test(name))) {
+      reasons.push('The account-related link contains a redirect parameter that may hide its final destination.');
     }
 
     for (const [brand, trustedHosts] of Object.entries(trustedBrandHosts)) {
@@ -130,6 +183,22 @@ export function inspectLinks(text) {
       if (!isTrustedHost && (hostname.includes(brand) || brandDomainInUrl)) {
         reasons.push(`The link mentions ${brand} but does not use one of its recognized domains.`);
       }
+      const normalizedBrand = brand.replace(/[^a-z\d]/g, '');
+      const lookalikeLabel = hostLabels.some((rawLabel) => {
+        const label = rawLabel.replace(/[^a-z\d]/g, '');
+        const normalizedLabel = label
+          .replace(/0/g, 'o')
+          .replace(/1/g, 'l')
+          .replace(/3/g, 'e')
+          .replace(/5/g, 's');
+        return label !== normalizedBrand &&
+          label.length >= 4 &&
+          Math.abs(label.length - normalizedBrand.length) <= 1 &&
+          levenshteinDistance(normalizedLabel, normalizedBrand) <= 1;
+      });
+      if (!isTrustedHost && lookalikeLabel) {
+        reasons.push(`The domain closely resembles the ${brand} name but is not its recognized domain.`);
+      }
     }
 
     if (reasons.length > 0 && !seen.has(candidate)) {
@@ -138,6 +207,22 @@ export function inspectLinks(text) {
     }
   }
   return flagged;
+}
+
+function levenshteinDistance(first, second) {
+  let previous = Array.from({ length: second.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= first.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= second.length; column += 1) {
+      current[column] = Math.min(
+        current[column - 1] + 1,
+        previous[column] + 1,
+        previous[column - 1] + (first[row - 1] === second[column - 1] ? 0 : 1)
+      );
+    }
+    previous = current;
+  }
+  return previous[second.length];
 }
 
 async function loadAdultImageModel() {
