@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { addContact, blockContact, getMessages, getUsers, unblockContact } from '../api';
 import { decryptMessage, deriveConversationKey, encryptFile, encryptMessage } from '../crypto';
 import { detectDeepfake } from '../aiDetect';
-import { inspectImageSafety, inspectTextSafety } from '../contentSafety';
+import { inspectImageSafety, inspectLinks, inspectTextSafety } from '../contentSafety';
 import socket from '../socket';
 
 function formatTime(timestamp) {
@@ -41,6 +41,7 @@ export default function Chat({ user, onLogout }) {
   const [online, setOnline] = useState([]);
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [focusedMessageId, setFocusedMessageId] = useState(null);
   const [activeMessageActions, setActiveMessageActions] = useState(null);
   const [replyingTo, setReplyingTo] = useState(null);
   const [draft, setDraft] = useState('');
@@ -65,6 +66,7 @@ export default function Chat({ user, onLogout }) {
   const scrollFrameRef = useRef(null);
   const selectedRef = useRef(selected);
   const contactsRef = useRef(contacts);
+  const pendingNotificationRef = useRef(null);
   const noticeTimerRef = useRef(null);
   selectedRef.current = selected;
   contactsRef.current = contacts;
@@ -75,7 +77,64 @@ export default function Chat({ user, onLogout }) {
     contact.username === contactSearch.trim().toLowerCase()
   );
   const canAddSearchedContact = /^[a-z0-9_]{3,24}$/i.test(contactSearch.trim()) && !exactContactMatch;
+  const suspiciousDraftLinks = inspectLinks(draft);
   const conversationBlocked = Boolean(selected?.blockedByMe || selected?.blockedMe);
+
+  function openNotifiedMessage(username, messageId) {
+    const contact = contactsRef.current.find((item) => item.username === username);
+    if (!contact) return;
+    pendingNotificationRef.current = messageId ? { username, messageId } : null;
+    setSelected(contact);
+    setFocusedMessageId(messageId || null);
+    setUnread((current) => {
+      if (!current[username]) return current;
+      const next = { ...current };
+      delete next[username];
+      return next;
+    });
+    setNotice(null);
+    if (messageId) {
+      window.requestAnimationFrame(() => {
+        const target = document.getElementById(`message-${messageId}`);
+        if (!target) return;
+        pendingNotificationRef.current = null;
+        shouldAutoScrollRef.current = false;
+        setFocusedMessageId(messageId);
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    }
+    window.focus();
+  }
+
+  async function showMessageNotification(message) {
+    const title = 'New encrypted message';
+    const options = {
+      body: 'You received a new encrypted message.',
+      icon: '/icon.svg',
+      tag: `ciphertrust-${user.username}-${message._id}`,
+      data: {
+        username: message.from,
+        messageId: message._id,
+        targetUsername: user.username
+      }
+    };
+    try {
+      const registration = 'serviceWorker' in navigator
+        ? await navigator.serviceWorker.getRegistration()
+        : null;
+      if (registration?.active && typeof registration.showNotification === 'function') {
+        await registration.showNotification(title, options);
+        return;
+      }
+      const notification = new Notification(title, options);
+      notification.onclick = () => {
+        openNotifiedMessage(message.from, message._id);
+        notification.close();
+      };
+    } catch (cause) {
+      console.error('Could not show browser notification:', cause);
+    }
+  }
 
   const decryptForDisplay = useCallback(async (items, peer) => {
     const activeItems = items.map((message) => message.unsent
@@ -123,9 +182,11 @@ export default function Chat({ user, onLogout }) {
         }
       }
       const restrictedCategory = message.type === 'text' ? inspectTextSafety(body) : null;
+      const suspiciousLinks = message.type === 'text' ? inspectLinks(body) : [];
       return {
         ...message,
         replyTo,
+        suspiciousLinks,
         body: restrictedCategory
           ? `[Restricted on this device: ${restrictedCategory} was hidden]`
           : body
@@ -150,6 +211,14 @@ export default function Chat({ user, onLogout }) {
       }
     };
     document.addEventListener('visibilitychange', clearSelectedUnread);
+    const handleServiceWorkerMessage = (event) => {
+      const payload = event.data;
+      if (payload?.type !== 'ciphertrust-open-message' ||
+          payload.targetUsername !== user.username ||
+          typeof payload.username !== 'string') return;
+      openNotifiedMessage(payload.username, payload.messageId);
+    };
+    navigator.serviceWorker?.addEventListener('message', handleServiceWorkerMessage);
     getUsers().then((items) => { if (active) setContacts(items); }).catch((cause) => setError(cause.message));
     socket.auth = { token: user.token };
     socket.on('online-users', setOnline);
@@ -164,6 +233,13 @@ export default function Chat({ user, onLogout }) {
     const registerSocketUser = () => socket.emit('register', user.username);
     socket.on('connect', registerSocketUser);
     socket.on('new-message', async (message) => {
+      if (!message || typeof message.from !== 'string' ||
+          typeof message.to !== 'string' ||
+          message.to.toLowerCase() !== user.username.toLowerCase() ||
+          message.from.toLowerCase() === user.username.toLowerCase()) {
+        console.warn('Ignored a message that was not addressed to the signed-in user.');
+        return;
+      }
       const peer = contactsRef.current.find((contact) => contact.username === message.from);
       const isOpenConversation = selectedRef.current?.username === message.from && !document.hidden;
       if (isOpenConversation) {
@@ -180,24 +256,7 @@ export default function Chat({ user, onLogout }) {
         noticeTimerRef.current = window.setTimeout(() => setNotice(null), 6000);
 
         if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-          const browserNotification = new Notification('New encrypted message', {
-            body: `Encrypted message from ${message.from}`,
-            icon: '/icon.svg',
-            tag: `ciphertrust-${message.from}`
-          });
-          browserNotification.onclick = () => {
-            window.focus();
-            const contact = contactsRef.current.find((item) => item.username === message.from);
-            if (contact) {
-              setSelected(contact);
-              setUnread((current) => {
-                const next = { ...current };
-                delete next[message.from];
-                return next;
-              });
-            }
-            browserNotification.close();
-          };
+          void showMessageNotification(message);
         }
       }
       if (selectedRef.current?.username === message.from && peer?.publicKey) {
@@ -221,6 +280,7 @@ export default function Chat({ user, onLogout }) {
     return () => {
       active = false;
       document.removeEventListener('visibilitychange', clearSelectedUnread);
+      navigator.serviceWorker?.removeEventListener('message', handleServiceWorkerMessage);
       window.clearTimeout(noticeTimerRef.current);
       window.clearTimeout(connectTimer);
       socket.removeAllListeners();
@@ -229,7 +289,11 @@ export default function Chat({ user, onLogout }) {
   }, [user.token, user.username, decryptForDisplay]);
 
   useEffect(() => {
-    shouldAutoScrollRef.current = true;
+    const pendingNotification = pendingNotificationRef.current;
+    if (pendingNotification && pendingNotification.username !== selected?.username) {
+      pendingNotificationRef.current = null;
+    }
+    shouldAutoScrollRef.current = !pendingNotificationRef.current;
     setActiveMessageActions(null);
     setReplyingTo(null);
     let active = true;
@@ -255,13 +319,25 @@ export default function Chat({ user, onLogout }) {
   }, [selected, user.username, decryptForDisplay]);
 
   useEffect(() => {
-    if (!shouldAutoScrollRef.current || !messagesRef.current) return undefined;
+    if (!messagesRef.current) return undefined;
     scrollFrameRef.current = window.requestAnimationFrame(() => {
+      const pending = pendingNotificationRef.current;
+      if (pending && pending.username === selected?.username) {
+        const target = document.getElementById(`message-${pending.messageId}`);
+        if (target) {
+          shouldAutoScrollRef.current = false;
+          pendingNotificationRef.current = null;
+          setFocusedMessageId(pending.messageId);
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+      if (!shouldAutoScrollRef.current) return;
       const container = messagesRef.current;
       if (container) container.scrollTop = container.scrollHeight;
     });
     return () => window.cancelAnimationFrame(scrollFrameRef.current);
-  }, [messages]);
+  }, [messages, selected]);
 
   async function sendText(event) {
     event?.preventDefault();
@@ -271,6 +347,11 @@ export default function Chat({ user, onLogout }) {
       setError(`This message may contain ${restrictedCategory} and was not sent.`);
       return;
     }
+    const suspiciousLinks = inspectLinks(draft.trim());
+    if (suspiciousLinks.length > 0 && !window.confirm(
+      `This message contains ${suspiciousLinks.length} suspicious link${suspiciousLinks.length === 1 ? '' : 's'}. ` +
+      'These links may be phishing attempts or hide their destination. Only continue if you trust them. Send anyway?'
+    )) return;
     setBusy(true);
     setError('');
     try {
@@ -293,7 +374,7 @@ export default function Chat({ user, onLogout }) {
       socket.emit('send-message', { to: selected.username, ...encrypted, type: 'text', clientId });
       setMessages((current) => [...current, {
         _id: `local-${clientId}`, clientId, from: user.username, to: selected.username,
-        body: text, timestamp, type: 'text', replyTo
+        body: text, timestamp, type: 'text', replyTo, suspiciousLinks
       }]);
       setDraft('');
       setReplyingTo(null);
@@ -585,10 +666,10 @@ export default function Chat({ user, onLogout }) {
               const canUnsend = mine && !message.unsent && !message._id.startsWith('local-');
               const canShowActions = !message.unsent && !message._id.startsWith('local-');
               const actionsOpen = activeMessageActions === message._id;
-              return               <div key={message._id} className={`message-row flex ${mine ? 'justify-end' : 'justify-start'}`}>
+              return               <div id={`message-${message._id}`} key={message._id} className={`message-row flex ${mine ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-[88%] sm:max-w-[70%] ${canShowActions ? 'cursor-pointer' : ''}`}>
                 <div
-                  className={`message-bubble rounded-2xl px-4 py-3 ${canShowActions ? 'transition hover:ring-2 hover:ring-teal-700/20' : ''} ${mine ? 'message-mine rounded-br-md text-slate-800' : 'message-theirs rounded-bl-md text-slate-800'}`}
+                  className={`message-bubble rounded-2xl px-4 py-3 ${focusedMessageId === message._id ? 'ring-2 ring-teal-500 ring-offset-2' : ''} ${canShowActions ? 'transition hover:ring-2 hover:ring-teal-700/20' : ''} ${mine ? 'message-mine rounded-br-md text-slate-800' : 'message-theirs rounded-bl-md text-slate-800'}`}
                   onPointerDown={canShowActions ? startMessageSwipe : undefined}
                   onPointerUp={canShowActions ? (event) => finishMessageSwipe(event, message) : undefined}
                   onClick={canShowActions ? () => {
@@ -614,6 +695,7 @@ export default function Chat({ user, onLogout }) {
                   message.type === 'image' && message.body.startsWith('data:image/') ? <img src={message.body} alt="Encrypted shared image" loading="lazy" decoding="async" className="mb-2 max-h-72 max-w-full rounded-lg object-contain" /> :
                     message.type === 'image' ? <p className="text-sm">🔒 {message.body}</p> :
                     <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.body}</p>}
+                  {message.suspiciousLinks?.length > 0 && <div role="status" className="mt-2 rounded-lg border border-amber-300/70 bg-amber-50/80 px-2.5 py-2 text-left text-[11px] leading-relaxed text-amber-900"><p className="font-semibold">Potential scam link — check before opening</p>{message.suspiciousLinks.map((link) => <p key={link.url} className="mt-1 break-all"><span className="font-medium">{link.url}</span>: {link.reasons.join(' ')}</p>)}</div>}
                   {message.aiVerdict && <p className="mt-2 rounded-lg border border-teal-950/5 bg-white/35 px-2.5 py-1.5 text-[11px] text-slate-700">Image check: {message.aiVerdict} · {Math.round((message.aiConfidence || 0) * 100)}% confidence</p>}
                   <p className={`mt-1.5 text-right text-[10px] ${mine ? 'text-teal-950/50' : 'text-slate-500'}`}>{formatTime(message.timestamp)}</p>
                 </div>
@@ -630,6 +712,7 @@ export default function Chat({ user, onLogout }) {
           {error && <p role="alert" className="mx-4 mb-2 rounded-xl border border-red-300/50 bg-red-50/70 px-3 py-2.5 text-sm text-red-800 sm:mx-7">{error}</p>}
           {!selected.publicKey && <p className="mx-4 mb-2 rounded-xl border border-amber-300/50 bg-amber-50/70 px-3 py-2.5 text-sm text-amber-800 sm:mx-7">This contact must sign in before you can send encrypted messages.</p>}
           <form onSubmit={sendText} className="composer-panel relative border-t border-white/50 p-3 sm:px-7 sm:py-4">
+            {suspiciousDraftLinks.length > 0 && <div role="status" className="mb-2 rounded-xl border border-amber-300/70 bg-amber-50/80 px-3 py-2 text-xs leading-relaxed text-amber-900"><p className="font-semibold">Potential scam link — check before sending</p>{suspiciousDraftLinks.map((link) => <p key={link.url} className="mt-1 break-all"><span className="font-medium">{link.url}</span>: {link.reasons.join(' ')}</p>)}</div>}
             {replyingTo && <div className="mb-2 flex items-center justify-between rounded-xl border-l-2 border-teal-700 bg-white/45 px-3 py-2"><div className="min-w-0"><p className="text-xs font-semibold text-teal-800">Replying to {replyingTo.from === user.username ? 'yourself' : `@${replyingTo.from}`}</p><p className="truncate text-xs text-slate-600">{replyingTo.preview}</p></div><button type="button" onClick={() => setReplyingTo(null)} className="ml-3 rounded-md px-2 py-1 text-slate-500 hover:bg-white/70" aria-label="Cancel reply">✕</button></div>}
             {emojiPickerOpen && <div className="absolute bottom-full left-3 z-20 mb-2 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-white/80 bg-white/95 shadow-xl backdrop-blur sm:left-7">
               <div role="tablist" aria-label="Message reactions" className="flex gap-1 border-b border-slate-200 p-2">

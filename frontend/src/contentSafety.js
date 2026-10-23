@@ -44,6 +44,32 @@ const restrictedTextPatterns = [
   }
 ];
 
+const shortenedUrlHosts = new Set([
+  'bit.ly',
+  'buff.ly',
+  'cutt.ly',
+  'goo.gl',
+  'is.gd',
+  'ow.ly',
+  'rb.gy',
+  'shorturl.at',
+  't.co',
+  'tinyurl.com'
+]);
+
+const trustedBrandHosts = {
+  amazon: ['amazon.com', 'amazon.co.uk', 'amazon.ca', 'amazon.de', 'amazon.in', 'amazon.co.jp'],
+  apple: ['apple.com', 'icloud.com'],
+  facebook: ['facebook.com', 'fb.com', 'meta.com'],
+  google: ['google.com', 'google.co.uk', 'google.ca', 'google.com.au', 'google.co.in', 'google.de', 'google.fr', 'google.co.jp'],
+  instagram: ['instagram.com'],
+  microsoft: ['microsoft.com', 'microsoftonline.com', 'microsoft365.com', 'office.com', 'outlook.com', 'live.com'],
+  netflix: ['netflix.com'],
+  paypal: ['paypal.com'],
+  skype: ['skype.com'],
+  whatsapp: ['whatsapp.com']
+};
+
 let adultImageModelPromise;
 
 export function inspectTextSafety(text) {
@@ -51,6 +77,67 @@ export function inspectTextSafety(text) {
     if (rule.patterns.some((pattern) => pattern.test(text))) return rule.category;
   }
   return null;
+}
+
+export function inspectLinks(text) {
+  if (typeof text !== 'string' || !text) return [];
+
+  const matches = text.matchAll(/(?:https?:\/\/|www\.)[^\s<>"']+|(?:[\p{L}\d](?:[\p{L}\d-]*[\p{L}\d])?\.)+[\p{L}]{2,}(?:\/[^\s<>"']*)?/giu);
+  const flagged = [];
+  const seen = new Set();
+
+  for (const [match] of matches) {
+    const candidate = match.replace(/[),.!?;:]+$/g, '');
+    const normalized = candidate.replace(/^www\./i, 'https://www.');
+    let url;
+    try {
+      url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(normalized) ? normalized : `https://${normalized}`);
+    } catch {
+      continue;
+    }
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    const reasons = [];
+
+    if (url.username || url.password) reasons.push('The link contains hidden login credentials.');
+    if (hostname.startsWith('xn--') || hostname.split('.').some((label) => label.startsWith('xn--'))) {
+      reasons.push('The domain uses encoded characters that can imitate other letters.');
+    }
+    if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname) || hostname.includes(':')) {
+      reasons.push('The link uses a raw IP address instead of a recognizable domain.');
+    }
+    if (shortenedUrlHosts.has(hostname)) {
+      reasons.push('The shortened link hides its final destination.');
+    }
+    if (url.protocol === 'http:') {
+      reasons.push('The link does not use an encrypted HTTPS connection.');
+    }
+    if (hostname.split('.').length > 4) {
+      reasons.push('The domain has an unusually long chain of subdomains.');
+    }
+
+    const isRecognizedBrandHost = Object.values(trustedBrandHosts).flat().some((host) =>
+      hostname === host || hostname.endsWith(`.${host}`)
+    );
+    if (!isRecognizedBrandHost && /(?:^|\/)(?:login|log-in|signin|sign-in|verify|verification|account|password|auth)(?:\/|$|[?#.-])/i.test(url.pathname)) {
+      reasons.push('The link opens a sign-in or account-verification page on an unrecognized domain.');
+    }
+
+    for (const [brand, trustedHosts] of Object.entries(trustedBrandHosts)) {
+      const isTrustedHost = trustedHosts.some((host) =>
+        hostname === host || hostname.endsWith(`.${host}`)
+      );
+      const brandDomainInUrl = candidate.toLowerCase().includes(`${brand}.`);
+      if (!isTrustedHost && (hostname.includes(brand) || brandDomainInUrl)) {
+        reasons.push(`The link mentions ${brand} but does not use one of its recognized domains.`);
+      }
+    }
+
+    if (reasons.length > 0 && !seen.has(candidate)) {
+      seen.add(candidate);
+      flagged.push({ url: candidate, reasons });
+    }
+  }
+  return flagged;
 }
 
 async function loadAdultImageModel() {

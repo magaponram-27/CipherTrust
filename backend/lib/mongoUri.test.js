@@ -17,6 +17,17 @@ test('does not double-encode percent-encoded credentials', () => {
   assert.equal(normalizeMongoUri(uri), uri);
 });
 
+test('encodes reserved characters in MongoDB usernames without passwords', () => {
+  const uri = 'mongodb://user@name@cluster0.example.net/ciphertrust';
+
+  assert.equal(normalizeMongoUri(uri), 'mongodb://user%40name@cluster0.example.net/ciphertrust');
+});
+
+test('returns non-string values unchanged', () => {
+  assert.equal(normalizeMongoUri(undefined), undefined);
+  assert.equal(normalizeMongoUri(null), null);
+});
+
 test('leaves MongoDB URIs without credentials unchanged', () => {
   const uri = 'mongodb+srv://cluster0.example.net/ciphertrust?retryWrites=true';
 

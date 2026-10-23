@@ -9,6 +9,8 @@ function encodeCredential(value) {
 }
 
 function normalizeMongoUri(uri) {
+  if (typeof uri !== 'string') return uri;
+
   const protocolEnd = uri.indexOf('://');
   if (protocolEnd === -1) return uri;
 
@@ -21,13 +23,16 @@ function normalizeMongoUri(uri) {
 
   const credentials = authority.slice(0, atIndex);
   const separatorIndex = credentials.indexOf(':');
-  if (separatorIndex === -1) return uri;
-
-  const username = credentials.slice(0, separatorIndex);
-  const password = credentials.slice(separatorIndex + 1);
   const hostAndPath = authority.slice(atIndex + 1);
+  const username = separatorIndex === -1 ? credentials : credentials.slice(0, separatorIndex);
+  const password = separatorIndex === -1 ? '' : credentials.slice(separatorIndex + 1);
+  const encodedUsername = encodeCredential(username);
 
-  return `${protocol}${encodeCredential(username)}:${encodeCredential(password)}@${hostAndPath}`;
+  if (separatorIndex === -1) {
+    return `${protocol}${encodedUsername}@${hostAndPath}`;
+  }
+
+  return `${protocol}${encodedUsername}:${encodeCredential(password)}@${hostAndPath}`;
 }
 
 module.exports = normalizeMongoUri;
