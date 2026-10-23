@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { addContact, blockContact, getMessages, getUsers, unblockContact } from '../api';
-import { decryptMessage, deriveConversationKey, encryptFile, encryptMessage } from '../crypto';
-import { detectDeepfake } from '../aiDetect';
+import { decryptFile, decryptMessage, deriveConversationKey, encryptFile, encryptMessage } from '../crypto';
+import { inspectGeneratorMetadata } from '../aiDetect';
 import { inspectImageSafety, inspectLinks, inspectTextSafety } from '../contentSafety';
 import socket from '../socket';
 
@@ -50,6 +50,8 @@ export default function Chat({ user, onLogout }) {
   const [contactSearch, setContactSearch] = useState('');
   const [typing, setTyping] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [imageSendStatus, setImageSendStatus] = useState('');
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
   const [addingContact, setAddingContact] = useState(false);
   const [blocking, setBlocking] = useState(false);
   const [unread, setUnread] = useState({});
@@ -67,6 +69,7 @@ export default function Chat({ user, onLogout }) {
   const selectedRef = useRef(selected);
   const contactsRef = useRef(contacts);
   const pendingNotificationRef = useRef(null);
+  const imageObjectUrlsRef = useRef(new Set());
   const noticeTimerRef = useRef(null);
   selectedRef.current = selected;
   contactsRef.current = contacts;
@@ -149,7 +152,14 @@ export default function Chat({ user, onLogout }) {
     }
     const key = await deriveConversationKey(user.identity.privateKey, peer.publicKey);
     const decrypted = await Promise.all(itemsToDecrypt.map(async (message) => {
-      const plaintext = await decryptMessage(message.ciphertext, message.iv, key);
+      let plaintext;
+      try {
+        plaintext = message.type === 'image' && message.fileType
+          ? await decryptFile(message.ciphertext, message.iv, message.fileType, key)
+          : await decryptMessage(message.ciphertext, message.iv, key);
+      } catch {
+        return { ...message, body: '[Unable to decrypt this image on this device]' };
+      }
       if (plaintext === '[Decryption failed]') {
         return {
           ...message,
@@ -158,14 +168,16 @@ export default function Chat({ user, onLogout }) {
       }
       let body = plaintext;
       let replyTo = null;
-      try {
-        const envelope = JSON.parse(plaintext);
-        if (envelope?.ciphertrustMessage === 1 && typeof envelope.text === 'string') {
-          body = envelope.text;
-          replyTo = envelope.replyTo || null;
+      if (message.type !== 'image') {
+        try {
+          const envelope = JSON.parse(plaintext);
+          if (envelope?.ciphertrustMessage === 1 && typeof envelope.text === 'string') {
+            body = envelope.text;
+            replyTo = envelope.replyTo || null;
+          }
+        } catch {
+          // Messages sent before reply support contain plain text.
         }
-      } catch {
-        // Messages sent before reply support contain plain text.
       }
       if (message.type === 'image') {
         try {
@@ -211,6 +223,10 @@ export default function Chat({ user, onLogout }) {
       }
     };
     document.addEventListener('visibilitychange', clearSelectedUnread);
+    const handleBrowserOnline = () => setConnectionStatus(socket.connected ? 'connected' : 'connecting');
+    const handleBrowserOffline = () => setConnectionStatus('disconnected');
+    window.addEventListener('online', handleBrowserOnline);
+    window.addEventListener('offline', handleBrowserOffline);
     const handleServiceWorkerMessage = (event) => {
       const payload = event.data;
       if (payload?.type !== 'ciphertrust-open-message' ||
@@ -219,6 +235,7 @@ export default function Chat({ user, onLogout }) {
       openNotifiedMessage(payload.username, payload.messageId);
     };
     navigator.serviceWorker?.addEventListener('message', handleServiceWorkerMessage);
+    setConnectionStatus(socket.connected ? 'connected' : 'connecting');
     getUsers().then((items) => { if (active) setContacts(items); }).catch((cause) => setError(cause.message));
     socket.auth = { token: user.token };
     socket.on('online-users', setOnline);
@@ -231,7 +248,11 @@ export default function Chat({ user, onLogout }) {
       }
     });
     const registerSocketUser = () => socket.emit('register', user.username);
-    socket.on('connect', registerSocketUser);
+    socket.on('connect', () => {
+      setConnectionStatus('connected');
+      registerSocketUser();
+    });
+    socket.on('disconnect', () => setConnectionStatus(socket.active ? 'reconnecting' : 'disconnected'));
     socket.on('new-message', async (message) => {
       if (!message || typeof message.from !== 'string' ||
           typeof message.to !== 'string' ||
@@ -275,16 +296,23 @@ export default function Chat({ user, onLogout }) {
       setMessages((current) => current.filter((item) => item._id !== message._id));
     });
     socket.on('message-error', (payload) => setError(payload.error));
-    socket.on('connect_error', (cause) => setError(`Realtime connection failed: ${cause.message}`));
+    socket.on('connect_error', (cause) => {
+      setConnectionStatus('reconnecting');
+      setError(`Realtime connection failed: ${cause.message}`);
+    });
     const connectTimer = window.setTimeout(() => socket.connect(), 0);
     return () => {
       active = false;
       document.removeEventListener('visibilitychange', clearSelectedUnread);
+      window.removeEventListener('online', handleBrowserOnline);
+      window.removeEventListener('offline', handleBrowserOffline);
       navigator.serviceWorker?.removeEventListener('message', handleServiceWorkerMessage);
       window.clearTimeout(noticeTimerRef.current);
       window.clearTimeout(connectTimer);
       socket.removeAllListeners();
       socket.disconnect();
+      for (const url of imageObjectUrlsRef.current) URL.revokeObjectURL(url);
+      imageObjectUrlsRef.current.clear();
     };
   }, [user.token, user.username, decryptForDisplay]);
 
@@ -391,6 +419,11 @@ export default function Chat({ user, onLogout }) {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file || !selected?.publicKey || conversationBlocked) return;
+    const recipient = selected;
+    if (!/^image\/(?:jpeg|png|webp|gif|avif|bmp|tiff)$/i.test(file.type)) {
+      setError('Choose a JPEG, PNG, WebP, GIF, AVIF, BMP, or TIFF image.');
+      return;
+    }
     if (file.size > 6 * 1024 * 1024) {
       setError('Images must be smaller than 6 MB so the encrypted message fits the relay limit.');
       return;
@@ -399,26 +432,50 @@ export default function Chat({ user, onLogout }) {
     setError('');
     try {
       if (!socket.connected) throw new Error('Chat server is disconnected. Check your connection and try again.');
-      const contentSafety = await inspectImageSafety(file);
+      setImageSendStatus('Checking image safety and metadata on this device…');
+      const [contentSafety, analysis] = await Promise.all([
+        inspectImageSafety(file),
+        inspectGeneratorMetadata(file)
+      ]);
       if (contentSafety.restricted) throw new Error(`Image blocked: it may contain ${contentSafety.category}.`);
-      const analysis = await detectDeepfake(file);
-      const key = await deriveConversationKey(user.identity.privateKey, selected.publicKey);
+      if (!socket.connected) throw new Error('Chat connection dropped during image checking. Retry when the chat reconnects.');
+      setImageSendStatus('Encrypting image on this device…');
+      const key = await deriveConversationKey(user.identity.privateKey, recipient.publicKey);
       const encrypted = await encryptFile(file, key);
       const clientId = crypto.randomUUID();
       const timestamp = Date.now();
-      const dataUrl = `data:${file.type};base64,${await fileToBase64(file)}`;
-      socket.emit('send-message', {
-        to: selected.username, ...encrypted, type: 'image',
-        aiVerdict: analysis.verdict, aiConfidence: analysis.confidence, clientId
+      setImageSendStatus('Sending encrypted image…');
+      const result = await new Promise((resolve, reject) => {
+        socket.timeout(20000).emit('send-message', {
+          to: recipient.username, ...encrypted, type: 'image',
+          aiVerdict: analysis.verdict, clientId
+        }, (timeoutError, response) => {
+          if (timeoutError) {
+            reject(new Error('Image delivery timed out. Check the connection and conversation history before retrying.'));
+          } else if (!response?.ok) {
+            reject(new Error(response?.error || 'The encrypted image could not be delivered.'));
+          } else {
+            resolve(response);
+          }
+        });
       });
+      if (!result?.messageId) throw new Error('The server did not confirm image delivery.');
+      const objectUrl = URL.createObjectURL(file);
+      imageObjectUrlsRef.current.add(objectUrl);
       setMessages((current) => [...current, {
-        _id: `local-${clientId}`, clientId, from: user.username, to: selected.username,
-        body: dataUrl, timestamp, type: 'image',
-        aiVerdict: analysis.verdict, aiConfidence: analysis.confidence
+        _id: result.messageId,
+        from: user.username,
+        to: recipient.username,
+        body: objectUrl,
+        timestamp: result.timestamp || timestamp,
+        type: 'image',
+        fileType: encrypted.fileType,
+        aiVerdict: analysis.verdict
       }]);
     } catch (cause) {
       setError(cause.message);
     } finally {
+      setImageSendStatus('');
       setBusy(false);
     }
   }
@@ -641,7 +698,7 @@ export default function Chat({ user, onLogout }) {
           <header className="chat-header flex items-center gap-2 border-b border-white/45 px-3 py-4 sm:gap-3 sm:px-7">
             <button className="grid h-9 w-9 place-items-center rounded-xl border border-white/50 bg-white/30 text-slate-600 transition hover:bg-white/70 hover:text-slate-900 md:hidden" onClick={() => setSelected(null)} aria-label="Back to contacts">←</button>
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-white/80 bg-gradient-to-br from-teal-100 to-cyan-100 font-semibold text-teal-900 shadow-sm">{selected.username[0]?.toUpperCase()}</div>
-            <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-slate-800">{selected.username}</p><p className={`mt-0.5 flex items-center gap-1.5 text-xs ${online.includes(selected.username) ? 'text-teal-700' : 'text-slate-500'}`}><span className={`h-1.5 w-1.5 rounded-full ${online.includes(selected.username) ? 'bg-teal-500' : 'bg-slate-400'}`} />{online.includes(selected.username) ? 'Online' : 'Offline'}</p></div>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-slate-800">{selected.username}</p><p className={`mt-0.5 flex items-center gap-1.5 text-xs ${online.includes(selected.username) ? 'text-teal-700' : 'text-slate-500'}`}><span className={`h-1.5 w-1.5 rounded-full ${online.includes(selected.username) ? 'bg-teal-500' : 'bg-slate-400'}`} />{online.includes(selected.username) ? 'Online' : 'Offline'}</p><p role="status" className={`mt-0.5 text-[10px] ${connectionStatus === 'connected' ? 'text-teal-700' : 'text-amber-800'}`}>{connectionStatus === 'connected' ? 'Chat connected' : connectionStatus === 'reconnecting' ? 'Reconnecting…' : connectionStatus === 'connecting' ? 'Connecting…' : 'Chat offline'}</p></div>
             <button
               onClick={toggleBlock}
               disabled={blocking}
@@ -692,11 +749,11 @@ export default function Chat({ user, onLogout }) {
                 >
                 {message.replyTo && <div className="mb-2 rounded-lg border-l-2 border-teal-700/50 bg-white/35 px-2.5 py-1.5 text-xs"><p className="font-medium text-teal-800">{message.replyTo.from === user.username ? 'You' : `@${message.replyTo.from}`}</p><p className="truncate text-slate-600">{message.replyTo.preview}</p></div>}
                 {message.type === 'sticker' ? <p className="py-1 text-center text-5xl leading-tight" role="img" aria-label="Sticker">{message.body}</p> :
-                  message.type === 'image' && message.body.startsWith('data:image/') ? <img src={message.body} alt="Encrypted shared image" loading="lazy" decoding="async" className="mb-2 max-h-72 max-w-full rounded-lg object-contain" /> :
+                  message.type === 'image' && (message.body.startsWith('data:image/') || message.body.startsWith('blob:')) ? <img src={message.body} alt="Encrypted shared image" loading="lazy" decoding="async" className="mb-2 max-h-72 max-w-full rounded-lg object-contain" /> :
                     message.type === 'image' ? <p className="text-sm">🔒 {message.body}</p> :
                     <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.body}</p>}
                   {message.suspiciousLinks?.length > 0 && <div role="status" className="mt-2 rounded-lg border border-amber-300/70 bg-amber-50/80 px-2.5 py-2 text-left text-[11px] leading-relaxed text-amber-900"><p className="font-semibold">Potential scam link — check before opening</p>{message.suspiciousLinks.map((link) => <p key={link.url} className="mt-1 break-all"><span className="font-medium">{link.url}</span>: {link.reasons.join(' ')}</p>)}</div>}
-                  {message.aiVerdict && <p className="mt-2 rounded-lg border border-teal-950/5 bg-white/35 px-2.5 py-1.5 text-[11px] text-slate-700">Image check: {message.aiVerdict} · {Math.round((message.aiConfidence || 0) * 100)}% confidence</p>}
+                  {message.aiVerdict && <p className="mt-2 rounded-lg border border-teal-950/5 bg-white/35 px-2.5 py-1.5 text-[11px] text-slate-700">On-device AI metadata check (not an authenticity verdict): {message.aiVerdict}</p>}
                   <p className={`mt-1.5 text-right text-[10px] ${mine ? 'text-teal-950/50' : 'text-slate-500'}`}>{formatTime(message.timestamp)}</p>
                 </div>
                 {canShowActions && actionsOpen && <div className="mt-1 flex justify-end gap-2">
@@ -711,6 +768,7 @@ export default function Chat({ user, onLogout }) {
           {conversationBlocked && <p className="mx-4 mb-2 rounded-xl border border-rose-300/40 bg-rose-50/70 px-3 py-2.5 text-sm text-rose-800 sm:mx-7">{selected.blockedByMe ? `You blocked @${selected.username}. New messages and typing indicators are stopped; existing history remains.` : `@${selected.username} has blocked you. You cannot send messages in this conversation.`}</p>}
           {error && <p role="alert" className="mx-4 mb-2 rounded-xl border border-red-300/50 bg-red-50/70 px-3 py-2.5 text-sm text-red-800 sm:mx-7">{error}</p>}
           {!selected.publicKey && <p className="mx-4 mb-2 rounded-xl border border-amber-300/50 bg-amber-50/70 px-3 py-2.5 text-sm text-amber-800 sm:mx-7">This contact must sign in before you can send encrypted messages.</p>}
+          {imageSendStatus && <p role="status" className="mx-4 mb-2 rounded-lg border border-teal-200/60 bg-teal-50/70 px-3 py-2 text-xs text-teal-900 sm:mx-7">{imageSendStatus}</p>}
           <form onSubmit={sendText} className="composer-panel relative border-t border-white/50 p-3 sm:px-7 sm:py-4">
             {suspiciousDraftLinks.length > 0 && <div role="status" className="mb-2 rounded-xl border border-amber-300/70 bg-amber-50/80 px-3 py-2 text-xs leading-relaxed text-amber-900"><p className="font-semibold">Potential scam link — check before sending</p>{suspiciousDraftLinks.map((link) => <p key={link.url} className="mt-1 break-all"><span className="font-medium">{link.url}</span>: {link.reasons.join(' ')}</p>)}</div>}
             {replyingTo && <div className="mb-2 flex items-center justify-between rounded-xl border-l-2 border-teal-700 bg-white/45 px-3 py-2"><div className="min-w-0"><p className="text-xs font-semibold text-teal-800">Replying to {replyingTo.from === user.username ? 'yourself' : `@${replyingTo.from}`}</p><p className="truncate text-xs text-slate-600">{replyingTo.preview}</p></div><button type="button" onClick={() => setReplyingTo(null)} className="ml-3 rounded-md px-2 py-1 text-slate-500 hover:bg-white/70" aria-label="Cancel reply">✕</button></div>}
@@ -766,14 +824,4 @@ export default function Chat({ user, onLogout }) {
       </div>
     </div>
   );
-}
-
-async function fileToBase64(file) {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let start = 0; start < bytes.length; start += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(start, start + chunkSize));
-  }
-  return btoa(binary);
 }

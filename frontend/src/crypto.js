@@ -50,8 +50,22 @@ export async function decryptMessage(ciphertextB64, ivB64, key) {
 
 export async function encryptFile(file, key) {
   const fileBytes = new Uint8Array(await file.arrayBuffer());
-  const dataUrl = `data:${file.type || 'application/octet-stream'};base64,${toBase64(fileBytes)}`;
-  return encryptMessage(dataUrl, key);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, fileBytes);
+  return {
+    ciphertext: toBase64(new Uint8Array(encrypted)),
+    iv: toBase64(iv),
+    fileType: file.type
+  };
+}
+
+export async function decryptFile(ciphertextB64, ivB64, fileType, key) {
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: fromBase64(ivB64) },
+    key,
+    fromBase64(ciphertextB64)
+  );
+  return `data:${fileType};base64,${toBase64(new Uint8Array(decrypted))}`;
 }
 
 export async function createOrUnlockIdentity(vaultKey, username, registeredPublicKey = '') {

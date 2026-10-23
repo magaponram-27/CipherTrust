@@ -73,21 +73,35 @@ io.on('connection', (socket) => {
     if (isFirstConnection) socket.broadcast.emit('user-online', username);
   });
 
-  socket.on('send-message', async (payload) => {
+  socket.on('send-message', async (payload, acknowledge) => {
+    const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
     try {
       if (!payload || typeof payload.to !== 'string' ||
           typeof payload.ciphertext !== 'string' || !payload.ciphertext ||
           typeof payload.iv !== 'string' || !payload.iv ||
           payload.ciphertext.length > 9_500_000 || payload.iv.length > 64) {
-        socket.emit('message-error', { error: 'Invalid or oversized encrypted message' });
+        const error = 'Invalid or oversized encrypted message';
+        socket.emit('message-error', { error });
+        respond({ ok: false, error });
+        return;
+      }
+      const type = ['text', 'image', 'voice', 'sticker'].includes(payload.type) ? payload.type : 'text';
+      const fileType = typeof payload.fileType === 'string' && /^image\/(?:jpeg|png|webp|gif|avif|bmp|tiff)$/i.test(payload.fileType)
+        ? payload.fileType.toLowerCase()
+        : null;
+      if (payload.fileType != null && !fileType) {
+        const error = 'Unsupported encrypted image format';
+        socket.emit('message-error', { error });
+        respond({ ok: false, error });
         return;
       }
       const recipient = payload.to.trim().toLowerCase();
       if (await usersHaveBlockedEachOther(username, recipient)) {
-        socket.emit('message-error', { error: 'This conversation is unavailable.' });
+        const error = 'This conversation is unavailable.';
+        socket.emit('message-error', { error });
+        respond({ ok: false, error });
         return;
       }
-      const type = ['text', 'image', 'voice', 'sticker'].includes(payload.type) ? payload.type : 'text';
       const aiConfidence = Number.isFinite(payload.aiConfidence)
         ? Math.min(1, Math.max(0, payload.aiConfidence))
         : null;
@@ -97,6 +111,7 @@ io.on('connection', (socket) => {
         ciphertext: payload.ciphertext,
         iv: payload.iv,
         type,
+        fileType: type === 'image' ? fileType : null,
         aiVerdict: typeof payload.aiVerdict === 'string' ? payload.aiVerdict.slice(0, 40) : null,
         aiConfidence,
         timestamp: Date.now()
@@ -106,10 +121,23 @@ io.on('connection', (socket) => {
       for (const socketId of onlineUsers.get(recipient) || []) {
         io.to(socketId).emit('new-message', response);
       }
-      socket.emit('message-sent', { ...response, clientId });
+      socket.emit('message-sent', {
+        _id: response._id,
+        from: response.from,
+        to: response.to,
+        type: response.type,
+        fileType: response.fileType,
+        aiVerdict: response.aiVerdict,
+        aiConfidence: response.aiConfidence,
+        timestamp: response.timestamp,
+        clientId
+      });
+      respond({ ok: true, messageId: response._id, timestamp: response.timestamp });
     } catch (error) {
       console.error('Could not relay encrypted message:', error.message);
-      socket.emit('message-error', { error: 'Message could not be delivered' });
+      const message = 'Message could not be delivered';
+      socket.emit('message-error', { error: message });
+      respond({ ok: false, error: message });
     }
   });
 
