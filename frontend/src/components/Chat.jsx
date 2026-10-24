@@ -42,6 +42,7 @@ export default function Chat({ user, onLogout }) {
   const [online, setOnline] = useState([]);
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [revealedUncheckedImages, setRevealedUncheckedImages] = useState(() => new Set());
   const [focusedMessageId, setFocusedMessageId] = useState(null);
   const [activeMessageActions, setActiveMessageActions] = useState(null);
   const [replyingTo, setReplyingTo] = useState(null);
@@ -191,8 +192,14 @@ export default function Chat({ user, onLogout }) {
               ? '[Image hidden by the on-device adult-content safety check]'
               : body
           };
-        } catch {
-          return { ...message, replyTo, body: '[Image hidden because its safety check could not run]' };
+        } catch (cause) {
+          return {
+            ...message,
+            replyTo,
+            body: '[Image safety check unavailable]',
+            imagePreview: body,
+            imageSafetyError: cause instanceof Error ? cause.message : 'Unknown image safety check error.'
+          };
         }
       }
       const restrictedCategory = message.type === 'text' ? inspectTextSafety(body) : null;
@@ -451,20 +458,56 @@ export default function Chat({ user, onLogout }) {
       const clientId = crypto.randomUUID();
       const timestamp = Date.now();
       setImageSendStatus('Sending encrypted image…');
-      const result = await new Promise((resolve, reject) => {
-        socket.timeout(20000).emit('send-message', {
-          to: recipient.username, ...encrypted, type: 'image',
-          aiVerdict: analysis.verdict, clientId
-        }, (timeoutError, response) => {
-          if (timeoutError) {
-            reject(new Error('Image delivery timed out. Check the connection and conversation history before retrying.'));
-          } else if (!response?.ok) {
-            reject(new Error(response?.error || 'The encrypted image could not be delivered.'));
-          } else {
-            resolve(response);
-          }
+      let result;
+      try {
+        result = await new Promise((resolve, reject) => {
+          socket.timeout(60000).emit('send-message', {
+            to: recipient.username,
+            ...encrypted,
+            type: 'image',
+            aiVerdict: analysis.verdict,
+            clientId
+          }, (timeoutError, response) => {
+            if (timeoutError) {
+              reject(new Error('No immediate server acknowledgment was received.'));
+            } else if (!response?.ok) {
+              reject(new Error(response?.error || 'The encrypted image could not be delivered.'));
+            } else {
+              resolve(response);
+            }
+          });
         });
-      });
+      } catch (cause) {
+        if (!socket.connected) {
+          throw new Error('The chat disconnected before image delivery could be confirmed. Reconnect and check the conversation before retrying.');
+        }
+        setImageSendStatus('Checking conversation history for a delayed delivery confirmation…');
+        let storedMessages;
+        try {
+          storedMessages = await getMessages(user.username, recipient.username);
+        } catch (historyError) {
+          throw new Error(
+            `Image delivery could not be confirmed. Check your conversation history before retrying. ` +
+            `History check failed: ${historyError.message}`,
+            { cause: historyError }
+          );
+        }
+        const storedMessage = storedMessages.find((message) =>
+          message.from?.toLowerCase() === user.username.toLowerCase() &&
+          message.to?.toLowerCase() === recipient.username.toLowerCase() &&
+          message.type === 'image' &&
+          message.ciphertext === encrypted.ciphertext &&
+          message.iv === encrypted.iv
+        );
+        if (!storedMessage) {
+          throw new Error(
+            'Image delivery timed out and the image was not found in conversation history. ' +
+            'Check your connection and history before retrying.',
+            { cause }
+          );
+        }
+        result = { messageId: storedMessage._id, timestamp: storedMessage.timestamp };
+      }
       if (!result?.messageId) throw new Error('The server did not confirm image delivery.');
       const objectUrl = URL.createObjectURL(preparedFile);
       imageObjectUrlsRef.current.add(objectUrl);
@@ -755,6 +798,24 @@ export default function Chat({ user, onLogout }) {
                 >
                 {message.replyTo && <div className="mb-2 rounded-lg border-l-2 border-teal-700/50 bg-white/35 px-2.5 py-1.5 text-xs"><p className="font-medium text-teal-800">{message.replyTo.from === user.username ? 'You' : `@${message.replyTo.from}`}</p><p className="truncate text-slate-600">{message.replyTo.preview}</p></div>}
                 {message.type === 'sticker' ? <p className="py-1 text-center text-5xl leading-tight" role="img" aria-label="Sticker">{message.body}</p> :
+                  message.type === 'image' && message.imageSafetyError ? <div className="mb-2 max-w-full">
+                    <p role="status" className="mb-2 max-w-sm rounded-lg border border-amber-300/70 bg-amber-50/90 px-2.5 py-2 text-left text-xs leading-relaxed text-amber-900">
+                      The image safety check failed on this device: {message.imageSafetyError}
+                    </p>
+                    {revealedUncheckedImages.has(message._id)
+                      ? <img src={message.imagePreview} alt="Shared image; safety check unavailable" loading="lazy" decoding="async" className="max-h-72 max-w-full rounded-lg object-contain" />
+                      : <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setRevealedUncheckedImages((current) => new Set(current).add(message._id));
+                        }}
+                        onKeyDown={(event) => event.stopPropagation()}
+                        className="min-h-11 rounded-lg border border-amber-300 bg-white/80 px-3 py-2 text-left text-xs font-semibold text-amber-900 hover:bg-amber-50"
+                      >
+                        Show image anyway — not safety checked
+                      </button>}
+                  </div> :
                   message.type === 'image' && (message.body.startsWith('data:image/') || message.body.startsWith('blob:')) ? <img src={message.body} alt="Encrypted shared image" loading="lazy" decoding="async" className="mb-2 max-h-72 max-w-full rounded-lg object-contain" /> :
                     message.type === 'image' ? <p className="text-sm">🔒 {message.body}</p> :
                     <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.body}</p>}
