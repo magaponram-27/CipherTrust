@@ -272,9 +272,20 @@ function loadImage(source) {
 async function prepareImageForClassification(source) {
   let image;
   let bitmapError;
-  if (source instanceof Blob && typeof createImageBitmap === 'function') {
+  let imageBlob = source instanceof Blob ? source : null;
+  if (!imageBlob && typeof source === 'string' && /^(?:blob:|data:image\/)/i.test(source)) {
     try {
-      image = await createImageBitmap(source, {
+      const response = await fetch(source);
+      if (!response.ok) throw new Error(`Image data could not be read (HTTP ${response.status}).`);
+      imageBlob = await response.blob();
+    } catch (error) {
+      bitmapError = error;
+    }
+  }
+
+  if (imageBlob && typeof createImageBitmap === 'function') {
+    try {
+      image = await createImageBitmap(imageBlob, {
         resizeWidth: imageModelInputSize,
         resizeHeight: imageModelInputSize,
         resizeQuality: 'low'
@@ -343,9 +354,13 @@ export async function inspectImageSafety(fileOrDataUrl, dependencies = {}) {
     } : { restricted: false, category: null, confidence: 0 };
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'Unknown image-analysis error.';
+    const couldNotDecode = /decode|read this image|image data could not be read/i.test(reason);
     throw new Error(
-      `The on-device image safety check failed: ${reason} The image was not sent or displayed. ` +
-      'Check your connection for the first model download and try an up-to-date browser.',
+      couldNotDecode
+        ? `The on-device safety check could not read this image: ${reason} ` +
+          'The image remains hidden until you choose to reveal it. Try JPEG or PNG, or an up-to-date browser.'
+        : `The on-device image safety check failed: ${reason} The image was not sent or displayed. ` +
+          'Check your connection for the first model download and try an up-to-date browser.',
       { cause: error }
     );
   } finally {

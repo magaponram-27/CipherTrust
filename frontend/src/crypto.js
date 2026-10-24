@@ -65,7 +65,7 @@ export async function decryptFile(ciphertextB64, ivB64, fileType, key) {
     key,
     fromBase64(ciphertextB64)
   );
-  return `data:${fileType};base64,${toBase64(new Uint8Array(decrypted))}`;
+  return new Blob([decrypted], { type: fileType || 'application/octet-stream' });
 }
 
 export async function createOrUnlockIdentity(vaultKey, username, registeredPublicKey = '') {

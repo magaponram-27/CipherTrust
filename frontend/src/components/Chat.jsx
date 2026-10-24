@@ -183,8 +183,13 @@ export default function Chat({ user, onLogout }) {
         }
       }
       if (message.type === 'image') {
+        const imageBlob = body instanceof Blob ? body : null;
+        if (imageBlob) {
+          body = URL.createObjectURL(imageBlob);
+          imageObjectUrlsRef.current.add(body);
+        }
         try {
-          const safety = await inspectImageSafety(body);
+          const safety = await inspectImageSafety(imageBlob || body);
           return {
             ...message,
             replyTo,

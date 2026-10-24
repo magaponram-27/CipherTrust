@@ -139,6 +139,58 @@ test('classifies a reduced image and preserves safety thresholds', async () => {
   assert.equal(canvas.height, 0);
 });
 
+test('decodes decrypted image blobs directly at model size for mobile browsers', async () => {
+  const originalCreateImageBitmap = globalThis.createImageBitmap;
+  const originalDocument = globalThis.document;
+  const originalImage = globalThis.Image;
+  let bitmapOptions;
+  let closed = false;
+  let canvasDrawn = false;
+  globalThis.createImageBitmap = async (blob, options) => {
+    assert.equal(blob.type, 'image/jpeg');
+    bitmapOptions = options;
+    return { close() { closed = true; } };
+  };
+  globalThis.document = {
+    createElement() {
+      return {
+        width: 0,
+        height: 0,
+        getContext() {
+          return { drawImage() { canvasDrawn = true; } };
+        }
+      };
+    }
+  };
+  globalThis.Image = class {
+    set src(_value) {
+      throw new Error('Blob decode should not use the full-size HTML image path.');
+    }
+  };
+
+  try {
+    const result = await inspectImageSafety(new Blob(['encrypted image bytes'], { type: 'image/jpeg' }), {
+      loadModel: async () => ({ classify: async () => [{ className: 'Neutral', probability: 0.99 }] })
+    });
+
+    assert.deepEqual(bitmapOptions, {
+      resizeWidth: 224,
+      resizeHeight: 224,
+      resizeQuality: 'low'
+    });
+    assert.equal(canvasDrawn, true);
+    assert.equal(closed, true);
+    assert.equal(result.restricted, false);
+  } finally {
+    if (originalCreateImageBitmap === undefined) delete globalThis.createImageBitmap;
+    else globalThis.createImageBitmap = originalCreateImageBitmap;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+    if (originalImage === undefined) delete globalThis.Image;
+    else globalThis.Image = originalImage;
+  }
+});
+
 test('reports image scan failures with the underlying reason', async () => {
   await assert.rejects(
     inspectImageSafety(new Blob(), {
@@ -147,7 +199,8 @@ test('reports image scan failures with the underlying reason', async () => {
     }),
     (error) => {
       assert.match(error.message, /could not decode HEIC/i);
-      assert.match(error.message, /image was not sent or displayed/i);
+      assert.match(error.message, /try JPEG or PNG/i);
+      assert.match(error.message, /image remains hidden until you choose to reveal it/i);
       assert.equal(error.cause.message, 'Browser could not decode HEIC');
       return true;
     }

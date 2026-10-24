@@ -11,12 +11,13 @@ test('encrypts image bytes directly and decrypts them without changing the conte
   const file = new Blob([original], { type: 'image/png' });
 
   const encrypted = await encryptFile(file, key);
-  const dataUrl = await decryptFile(encrypted.ciphertext, encrypted.iv, encrypted.fileType, key);
-  const decoded = Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64');
+  const decrypted = await decryptFile(encrypted.ciphertext, encrypted.iv, encrypted.fileType, key);
+  const decoded = Buffer.from(await decrypted.arrayBuffer());
 
   assert.equal(encrypted.fileType, 'image/png');
+  assert.equal(decrypted instanceof Blob, true);
+  assert.equal(decrypted.type, 'image/png');
   assert.deepEqual(decoded, Buffer.from(original));
-  assert.equal(dataUrl.startsWith('data:image/png;base64,'), true);
 });
 
 test('encrypted image bytes do not contain the original image data', async () => {
