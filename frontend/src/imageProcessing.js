@@ -46,7 +46,8 @@ export async function prepareImageForSending(file) {
   if (file.size > maxSourceBytes) {
     throw new Error('This image is too large to prepare safely on this device (maximum 20 MB). Choose a smaller image.');
   }
-  if (file.size <= maxTransferBytes && !heifTypes.has(type)) return file;
+  if (file.size <= maxTransferBytes &&
+      ['image/jpeg', 'image/png', 'image/gif'].includes(type)) return file;
   if (type === 'image/gif') {
     throw new Error('This GIF is larger than 6 MB. Choose a smaller GIF to preserve its animation.');
   }
@@ -70,10 +71,7 @@ export async function prepareImageForSending(file) {
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(width * scale));
     canvas.height = Math.max(1, Math.round(height * scale));
-    const isHeif = heifTypes.has(type);
-    const outputType = isHeif || type === 'image/bmp' || type === 'image/tiff'
-      ? 'image/jpeg'
-      : type;
+    const outputType = type === 'image/png' ? 'image/png' : 'image/jpeg';
     const context = canvas.getContext('2d', { alpha: outputType !== 'image/jpeg' });
     if (!context) throw new Error('This browser could not prepare the image canvas.');
     if (outputType === 'image/jpeg') {
