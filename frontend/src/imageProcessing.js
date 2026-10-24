@@ -46,8 +46,7 @@ export async function prepareImageForSending(file) {
   if (file.size > maxSourceBytes) {
     throw new Error('This image is too large to prepare safely on this device (maximum 20 MB). Choose a smaller image.');
   }
-  if (file.size <= maxTransferBytes &&
-      ['image/jpeg', 'image/png', 'image/gif'].includes(type)) return file;
+  if (file.size <= maxTransferBytes && type === 'image/gif') return file;
   if (type === 'image/gif') {
     throw new Error('This GIF is larger than 6 MB. Choose a smaller GIF to preserve its animation.');
   }
